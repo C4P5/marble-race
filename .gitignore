@@ -21,3 +21,9 @@ node_modules
 
 # cli
 dist
+
+# Documentación de referencia — solo local, NO subir
+# (inglés original + guía de defensa privada; el entregable en español sí se sube)
+docs/data-model.md
+docs/concept-defense.md
+docs/concept-defense.es.md
