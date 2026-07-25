@@ -1,83 +1,94 @@
-# 🏗 Scaffold-ETH 2
+# 🔵 Marble Race
 
-<h4 align="center">
-  <a href="https://docs.scaffoldeth.io">Documentation</a> |
-  <a href="https://scaffoldeth.io">Website</a>
-</h4>
+> **Carreras de bolitas probadamente justas sobre Ethereum.**
+> Ethereum Uruguay 2026 · Track General.
 
-🧪 An open-source, up-to-date toolkit for building decentralized applications (dapps) on the Ethereum blockchain. It's designed to make it easier for developers to create and deploy smart contracts and build user interfaces that interact with those contracts.
+Las carreras de bolitas ya son un fenómeno de masas — Jelle's Marble Runs tiene 1,45 M de
+suscriptores y ~200 M de vistas, pasó por HBO y ESPN. Pero esa audiencia es **100 % pasiva**: mirás,
+pero no podés tener una bolita, competir con ella, ni probar que el resultado no se armó en la
+edición. Marble Race le agrega las tres cosas que un video no puede: **propiedad, participación y
+justicia demostrable** — y es una puerta de entrada de baja fricción a Ethereum, porque todo el mundo
+ya entiende una carrera de bolitas.
 
-> [!NOTE]
-> 🤖 Scaffold-ETH 2 is AI-ready! It has everything agents need to build on Ethereum. Check `.agents/`, `.claude/`, `.opencode` or `.cursor/` for more info.
+---
 
-⚙️ Built using NextJS, RainbowKit, Foundry, Wagmi, Viem, and Typescript.
-
-- ✅ **Contract Hot Reload**: Your frontend auto-adapts to your smart contract as you edit it.
-- 🪝 **[Custom hooks](https://docs.scaffoldeth.io/hooks/)**: Collection of React hooks wrapper around [wagmi](https://wagmi.sh/) to simplify interactions with smart contracts with typescript autocompletion.
-- 🧱 [**Components**](https://docs.scaffoldeth.io/components/): Collection of common web3 components to quickly build your frontend.
-- 🔥 **Burner Wallet & Local Faucet**: Quickly test your application with a burner wallet and local faucet.
-- 🔐 **Integration with Wallet Providers**: Connect to different wallet providers and interact with the Ethereum network.
-
-![Debug Contracts tab](https://github.com/scaffold-eth/scaffold-eth-2/assets/55535804/b237af0c-5027-4849-a5c1-2e31495cccb1)
-
-## Requirements
-
-Before you begin, you need to install the following tools:
-
-- [Node (>= v20.18.3)](https://nodejs.org/en/download/)
-- Yarn ([v1](https://classic.yarnpkg.com/en/docs/install/) or [v2+](https://yarnpkg.com/getting-started/install))
-- [Git](https://git-scm.com/downloads)
-
-## Quickstart
-
-To get started with Scaffold-ETH 2, follow the steps below:
-
-1. Install dependencies if it was skipped in CLI:
+## Cómo funciona — el loop
 
 ```
-cd my-dapp-example
+mintear bolita (NFT) → acumular crédito (MRBL) → entrar a una carrera
+       → sorteo por Chainlink VRF → settle → cobrar el premio
+```
+
+Las 16 bolitas **especiales** siembran los premios desde sus emisiones. El ganador lo decide
+**Chainlink VRF** (aleatoriedad verificable on-chain); la animación es una **reproducción
+determinista** que *llega* a ese resultado — la pantalla nunca puede diferir de la cadena.
+
+## Arquitectura
+
+| Contrato | Rol |
+|---|---|
+| `MarbleNFT` | 256 bolitas. 1–16 especiales, 17–256 públicas (mint gratis, 1 por wallet). Arte **100 % on-chain** (SVG generado en `tokenURI`). |
+| `MarbleToken` (MRBL) | Crédito de arcade de circuito cerrado. Se gana solo por emisión; quemable. |
+| `MarbleVault` | "La casa es un contrato que posee sus propias bolitas." Custodia de las especiales + premios. |
+| `MarbleRace` | Pools de carrera: entrar → VRF → settle → cobros tipo *pull*. |
+
+**Justicia:** Chainlink VRF v2.5 (aleatoriedad) + coreografía determinista (animación).
+**Linaje:** aplica Speedrun Ethereum **#08 (mercados de predicción)** y **#10 (multisig/custodia)**.
+
+## Estado
+
+| Pieza | Estado |
+|---|---|
+| Contratos Stage 1 (NFT · Token · Vault) | ✅ **32/32 tests** |
+| Arte on-chain (`tokenURI`) | 🎨 diseño aprobado (SVG generado, 100 % on-chain) |
+| `MarbleRace` + frontend | 🔨 construyéndose durante el evento |
+| Red | Sepolia (testnet) |
+
+## Probadamente justo, sin trampa
+
+El número aleatorio lo genera Chainlink VRF **con prueba criptográfica** — fuera del alcance de los
+jugadores, del operador y del validador. Cada resultado y cada pago quedan verificables en Etherscan.
+Es una economía de arcade cerrada (sin valor en efectivo), no un producto financiero.
+
+## Correr localmente
+
+```bash
 yarn install
+yarn chain      # blockchain local (anvil)
+yarn deploy     # desplegar contratos
+yarn start      # frontend en http://localhost:3000
 ```
 
-2. Run a local network in the first terminal:
+Sepolia: `yarn deploy --network sepolia`. Detalle de comandos y convenciones en [AGENTS.md](AGENTS.md).
 
-```
-yarn chain
-```
+## Direcciones desplegadas (Sepolia)
 
-This command starts a local Ethereum network using Foundry. The network runs on your local machine and can be used for testing and development. You can customize the network configuration in `packages/foundry/foundry.toml`.
+| Contrato | Dirección |
+|---|---|
+| MarbleNFT | `por desplegar` |
+| MarbleToken | `por desplegar` |
+| MarbleVault | `por desplegar` |
+| MarbleRace | `por desplegar` |
 
-3. On a second terminal, deploy the test contract:
+## Documentación / Entregables
 
-```
-yarn deploy
-```
+| Documento | Qué es |
+|---|---|
+| [Modelo de datos](docs/data-model.es.md) | Spec de contratos + máquina de estados de `MarbleRace` (también sirve de spec de build) |
+| [Brainstorming](docs/brainstorming.es.md) | Cómo llegamos a la idea: observación, alternativas, decisiones |
+| [Business Model Canvas](docs/business-model-canvas.es.md) | Los 9 bloques del modelo de negocio |
+| [Wireframes](docs/wireframes.es.md) | Flujo de pantallas y arquitectura de información |
+| [Guion del video pitch](docs/pitch-video-script.es.md) | Guion ≤ 5 min |
+| [Integración de gráficos](docs/graphics-integration.es.md) | Contrato entre la cadena y el motor de render (Three.js) |
+| [Prototipo de coreografía](docs/prototype/) | Motor determinista + spike visual (verificado en 1000 carreras) |
 
-This command deploys a test smart contract to the local network. The contract is located in `packages/foundry/contracts` and can be modified to suit your needs. The `yarn deploy` command uses the deploy script located in `packages/foundry/script` to deploy the contract to the network. You can also customize the deploy script.
+## Roadmap (visión)
 
-4. On a third terminal, start your NextJS app:
+Carreras físicas semanales transmitidas con las 16 bolitas reales espejadas on-chain, y apuestas
+parimutuel verificables. Un fenómeno pasivo que se convierte en un juego que se juega, se posee y se
+puede probar.
 
-```
-yarn start
-```
+---
 
-Visit your app on: `http://localhost:3000`. You can interact with your smart contract using the `Debug Contracts` page. You can tweak the app config in `packages/nextjs/scaffold.config.ts`.
-
-Run smart contract test with `yarn foundry:test`
-
-- Edit your smart contracts in `packages/foundry/contracts`
-- Edit your frontend homepage at `packages/nextjs/app/page.tsx`. For guidance on [routing](https://nextjs.org/docs/app/building-your-application/routing/defining-routes) and configuring [pages/layouts](https://nextjs.org/docs/app/building-your-application/routing/pages-and-layouts) checkout the Next.js documentation.
-- Edit your deployment scripts in `packages/foundry/script`
-
-
-## Documentation
-
-Visit our [docs](https://docs.scaffoldeth.io) to learn how to start building with Scaffold-ETH 2.
-
-To know more about its features, check out our [website](https://scaffoldeth.io).
-
-## Contributing to Scaffold-ETH 2
-
-We welcome contributions to Scaffold-ETH 2!
-
-Please see [CONTRIBUTING.MD](https://github.com/scaffold-eth/scaffold-eth-2/blob/main/CONTRIBUTING.md) for more information and guidelines for contributing to Scaffold-ETH 2.
+<sub>Construido con [Scaffold-ETH 2](https://scaffoldeth.io) (Foundry). Aleatoriedad por
+[Chainlink VRF](https://docs.chain.link/vrf).</sub>
