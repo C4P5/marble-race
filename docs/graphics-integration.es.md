@@ -155,7 +155,44 @@ propio circuito.
 
 ---
 
-## 9. Checklist de integración
+## 9. Entrega — qué mandás y cómo
+
+Lo primero: lo único que **acopla con el motor** es la **línea de carrera como puntos**. Modelás la
+pista y después trazás explícitamente su línea central como puntos de control. Una pista linda sin
+línea extraíble no se puede correr; una pista simple con línea limpia se integra en minutos.
+
+**Mandás dos archivos:**
+
+1. **La pista (malla)** → **`.glb`** (GLTF binario: geometría + texturas en un solo archivo).
+2. **La línea de carrera** → **JSON**: un array ordenado de puntos `[x, y, z]` (el centro del
+   recorrido), en el **mismo espacio de coordenadas** que la malla.
+
+**Cómo mandarlo:**
+
+- **Mejor — por el repo:** el `.glb` va en `packages/nextjs/public/track/` (Next.js sirve `/public`;
+  Three.js lo carga con `GLTFLoader`), el JSON al lado. Commit + push — todos sincronizados y versionado.
+- Si el `.glb` pesa mucho: pasalo por Drive/WeTransfer y mandá solo el JSON por el repo.
+- **No mandes:** screenshots/renders (no se usan) ni el `.blend`/archivo de proyecto (no se carga en
+  runtime — siempre exportá a `.glb`).
+
+**Cómo matchea con el spike 2D:**
+
+- Los dos usan el **mismo `choreography.js`**. En 2D, `pointAt` sale de 13 puntos por Catmull-Rom.
+- En 3D, la app arma un `THREE.CatmullRomCurve3` con tus puntos: `curve.getPointAt(f)` = posición,
+  `curve.getTangentAt(f)` = dirección (para orientar y para el offset de carril). El `f` (progreso
+  `0→1` del motor) mapea igual. Vos das los puntos; el motor y la cadena no se tocan.
+
+**Convenciones:**
+
+- GLB es Y-up. Exportá la línea de carrera desde la **misma escena** que la malla para que coincidan.
+- Poné los obstáculos visuales cerca de las fracciones `i/10` (el motor usa 10 tramos; ahí pasan los
+  cambios de liderazgo).
+- Alternativa al JSON: embebé la línea como una curva o *empties* nombrados dentro del propio `.glb`
+  (p. ej. `racingLine`) y la extraemos por nombre — mismo espacio de coordenadas garantizado.
+
+---
+
+## 10. Checklist de integración
 
 - [ ] `pointAt(f)` devuelve posición 3D + tangente + normal para `f ∈ [0,1]`
 - [ ] 10 obstáculos ubicados en `f = i/10`
