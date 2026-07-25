@@ -7,8 +7,8 @@
 **Linaje:** el pool de carrera es un mercado de predicción con forma de carrera. Su diseño aplica
 dos desafíos de Speedrun Ethereum — **Challenge 08 (Mercados de Predicción)**: pagos tipo *pull* en
 lugar de `transfer()`, un camino de reembolso explícito y cero fees varados; y
-**Challenge 10 (Multisig)**: custodia en manos del contrato con una frontera de autorización y
-compromisos (*commitments*) protegidos contra *replay*.
+**Challenge 10 (Multisig)**: custodia en manos del contrato con una frontera de autorización (la
+bóveda). La aleatoriedad la provee **Chainlink VRF v2.5** — aleatoriedad verificable on-chain.
 
 ---
 
@@ -22,9 +22,9 @@ transacciones de cableado posteriores al deploy.
 | 1 | `MarbleVault` | "La casa es un contrato que posee sus propias bolitas." Guarda las 16 especiales y sus emisiones. | ✅ Construido, 13 tests |
 | 2 | `MarbleNFT` | 256 bolitas. Ids 1–16 especiales (en la bóveda), 17–256 públicas de minteo gratuito, 1 pública por wallet. | ✅ Construido, 9 tests |
 | 3 | `MarbleToken` | `MRBL`, crédito de arcade de circuito cerrado. El único camino de minteo es reclamar emisiones. Quemable. | ✅ Construido, 5 tests |
-| 4 | `MarbleRace` | Pools de carrera: entrar + *commit* → *reveal* → *settle* → cobros tipo *pull*. | ⬜ **Objetivo de construcción** |
+| 4 | `MarbleRace` | Pools de carrera: entrar → sorteo por VRF → settle → cobros tipo *pull*. | ⬜ **Objetivo de construcción** |
 
-Orden de deploy: `Vault → NFT(vault) → Token(nft) → Race(nft, token, vault)`.
+Orden de deploy: `Vault → NFT(vault) → Token(nft) → Race(nft, token, vault, coordinatorVRF)`.
 
 ---
 
@@ -65,41 +65,48 @@ contra un manager hostil.
 
 ### 1.4 MarbleRace (a construir)
 
+Hereda `VRFConsumerBaseV2Plus`. La aleatoriedad la pide al Coordinator de Chainlink y llega por
+callback en un bloque posterior.
+
 ```solidity
 enum Status { Open, Locked, Settled, Cancelled }
+// Open    = aceptando jugadores
+// Locked  = cerrado, se pidió aleatoriedad a VRF, esperando el callback
+// Settled = VRF respondió, orden y pagos acreditados
+// Cancelled = no se llenó, reembolsos
 
 struct Pool {
     uint16  specialId;      // 1..16 — la bolita especial que ancla este pool (identidad del pool)
     uint128 entry;          // MRBL requerido por jugador. Igual al seed ("1X").
     uint128 seed;           // MRBL tomado de las emisiones de la especial; el piso de premio
-    uint128 pot;            // seed + suma de las entradas recaudadas
+    uint128 pot;            // seed + suma de las entradas
     uint64  joinDeadline;   // después de esto: lock (si >= minPlayers) o cancel
-    uint64  revealDeadline; // se fija al momento del lock
     Status  status;
     address creator;        // recibe el corte del creador
     uint16  playerCount;
-    uint16  revealedCount;
-    bytes32 raceSeed;       // se fija en el settlement; maneja la animación del frontend
+    bytes32 raceSeed;       // se fija en el callback de VRF; maneja la animación del frontend
 }
 
-struct Player {
-    uint16  marbleId;   // la bolita pública que corre
-    bytes32 commitment; // keccak256(abi.encode(secret, msg.sender, poolId))
-    bool    revealed;
-    bool    exists;
-}
+// --- config VRF (inmutable / owner) ---
+bytes32 keyHash;            // gas lane de Sepolia
+uint256 subscriptionId;    // suscripción financiada con LINK
+uint32  callbackGasLimit;
+uint16  requestConfirmations;
 
 mapping(uint256 poolId => Pool)                        public pools;
-mapping(uint256 poolId => mapping(address => Player))  public entrants;
-mapping(uint256 poolId => address[])                   public roster;       // enumeración para el settlement
-mapping(uint256 poolId => bytes32)                     internal entropyAcc; // acumulador (XOR/hash) de los reveals
-mapping(address => uint256)                            public winnings;     // libro de pagos tipo pull
-mapping(uint16 specialId => uint256 poolId)            public activePool;   // un pool vivo por especial
+mapping(uint256 poolId => mapping(address => uint16))  public marbleOf;   // wallet → bolita en el pool
+mapping(uint256 poolId => address[])                   public roster;     // enumeración para el settlement
+mapping(uint256 requestId => uint256 poolId)          internal requestToPool; // VRF: request → pool
+mapping(address => uint256)                            public winnings;   // libro de pagos tipo pull
+mapping(uint16 specialId => uint256 poolId)            public activePool; // un pool vivo por especial
 ```
 
 **Relaciones.** Un `Pool` está anclado a exactamente una bolita especial (≤16 pools simultáneos).
 Una wallet posee ≤1 bolita pública, por lo tanto ≤1 entrada por pool. `winnings` es global entre
 pools, así que un jugador retira una sola vez por todo lo que se le debe.
+
+**Ya no hay** commitments, reveals ni depósito de slashing: VRF elimina toda esa maquinaria. El que
+entra hace **una sola acción** (entrar); no vuelve a firmar nada.
 
 ---
 
@@ -110,33 +117,32 @@ pools, así que un jugador retira una sola vez por todo lo que se le debe.
                                   │
                                   ▼
                             ┌──────────┐
-              entrar+commit │   OPEN   │ ──── venció el plazo y count < minPlayers ───┐
+                     entrar │   OPEN   │ ──── venció el plazo y count < minPlayers ───┐
               (≤ maxPlayers)└──────────┘                                              │
                                   │                                                   ▼
        count == maxPlayers (auto) │  O  venció el plazo y count >= minPlayers    ┌───────────┐
-                                  ▼      (poke permisionless startRace)          │ CANCELLED │
-                            ┌──────────┐                                         └───────────┘
-                     reveal │  LOCKED  │                                          solo reembolsos
+       → requestRandomWords()     ▼      (poke permisionless startRace)          │ CANCELLED │
+                            ┌──────────┐  → requestRandomWords()                 └───────────┘
+      (esperando a Chainlink)│  LOCKED  │                                         solo reembolsos
                             └──────────┘
-                                  │ venció revealDeadline (settle permisionless)
+                                  │ fulfillRandomWords() ← el Coordinator de VRF
                                   ▼
                             ┌──────────┐
-                            │ SETTLED  │  → se acreditan las ganancias, retiros tipo pull
+                            │ SETTLED  │  → orden, ganancias acreditadas, retiros tipo pull
                             └──────────┘
 ```
 
 | Desde | Hacia | Disparador | Guarda |
 |---|---|---|---|
 | — | Open | `createPool(specialId, seed)` | el que llama es el manager; no hay pool activo para esa especial |
-| Open | Open | `join(poolId, marbleId, commitment)` | estado Open, antes de `joinDeadline`, el que llama posee una bolita **pública**, no entró todavía, `playerCount < maxPlayers` |
-| Open | Locked | `join` llenando el último lugar | `playerCount == maxPlayers` — **atómico**, misma tx |
-| Open | Locked | `startRace(poolId)` | pasado `joinDeadline`, `playerCount >= minPlayers`. Permisionless; el que llama gana la recompensa del poke |
+| Open | Open | `join(poolId, marbleId)` | estado Open, antes de `joinDeadline`, el que llama posee una bolita **pública**, no entró todavía, `playerCount < maxPlayers` |
+| Open | Locked | `join` llenando el último lugar → `requestRandomWords` | `playerCount == maxPlayers` — **atómico**, misma tx |
+| Open | Locked | `startRace(poolId)` → `requestRandomWords` | pasado `joinDeadline`, `playerCount >= minPlayers`. Permisionless; el que llama gana la recompensa del poke |
 | Open | Cancelled | `cancel(poolId)` | pasado `joinDeadline`, `playerCount < minPlayers`. Permisionless |
-| Locked | Locked | `reveal(poolId, secret)` | estado Locked, antes de `revealDeadline`, el commitment coincide |
-| Locked | Settled | `settle(poolId)` | pasado `revealDeadline`. Permisionless |
+| Locked | Settled | `fulfillRandomWords(requestId, randomWords)` | **solo** el Coordinator de VRF; el `requestId` mapea al pool |
 
-Todo lo posterior a la ventana de inscripción es **permisionless** — ningún operador puede frenar
-una carrera.
+El cierre de inscripción y el sorteo son a prueba de operador: nadie puede orientar el resultado ni
+frenar una carrera; el settlement lo dispara el callback de Chainlink.
 
 ---
 
@@ -145,35 +151,34 @@ una carrera.
 1. **Sembrar (seed).** El manager toma las emisiones acumuladas de una bolita especial desde la
    bóveda (`vault.transferToken`) y abre un pool. Ese monto es a la vez el piso de premio y el
    tamaño de la entrada — cada jugador iguala a la casa en "1X".
-2. **Entrar + commit (Open).** Quien posee una bolita pública deposita `entry` MRBL y envía
-   `commitment = keccak256(abi.encode(secret, msg.sender, poolId))`. Atar el sender y el id del pool
-   dentro del hash evita que se repita (*replay*) el commitment de otro jugador (la lección de replay
-   del Challenge 10).
-3. **Lock.** Llenar el último lugar hace lock atómicamente en la misma transacción. Si no, una vez
-   que vence el plazo de inscripción con al menos `minPlayers`, cualquiera puede hacer *poke* a
-   `startRace` y cobrar una recompensa.
-4. **Reveal (Locked).** Cada jugador revela su `secret`. El contrato lo verifica contra el commitment
-   y lo mezcla en `entropyAcc`. Los jugadores que nunca revelan quedan **excluidos del podio y
-   pierden su entrada, que queda en el pot** — la entrada funciona como depósito anti-griefing.
-5. **Settle.** `raceSeed = keccak256(abi.encode(entropyAcc, block.prevrandao, poolId))`. Un shuffle
-   Fisher–Yates sobre el roster que reveló, manejado por `raceSeed`, produce el orden de llegada.
-   Cada bolita que reveló tiene igual probabilidad de ganar. Se emiten el podio y el orden completo.
-6. **Cobrar (claim).** Los pagos se acreditan en `winnings` y el jugador los retira. Nunca se empuja
+2. **Entrar (Open).** Quien posee una bolita pública deposita `entry` MRBL y entra con su `marbleId`.
+   **Una sola transacción, sin commitment.**
+3. **Lock + pedido de aleatoriedad.** Llenar el último lugar hace lock atómicamente en la misma
+   transacción. Si no, una vez vencido el plazo con al menos `minPlayers`, cualquiera hace *poke* a
+   `startRace` (y cobra una recompensa). Al hacer lock, el contrato llama
+   `requestRandomWords()` a Chainlink y guarda `requestToPool[requestId] = poolId`.
+4. **Settle (callback de VRF).** Chainlink llama `fulfillRandomWords(requestId, randomWords)`. El
+   contrato deriva `raceSeed = keccak256(abi.encode(randomWords[0], poolId))`, hace un shuffle
+   Fisher–Yates sobre el roster (cada bolita con igual probabilidad), acredita los pagos y emite el
+   orden. Todo pasa dentro del callback.
+5. **Cobrar (claim).** Los pagos se acreditan en `winnings` y el jugador los retira. Nunca se empuja
    nada (la lección del `transfer()` del Challenge 08).
-7. **Cancelar.** Por debajo de `minPlayers` al vencimiento, a cada jugador se le acredita el
+6. **Cancelar.** Por debajo de `minPlayers` al vencimiento, a cada jugador se le acredita el
    **reembolso completo** de su entrada y el seed vuelve a la bóveda. Ningún fondo queda varado.
+7. **Salvaguarda.** Si el callback de VRF no llegara (subscripción sin LINK, etc.), el owner puede
+   re-pedir la aleatoriedad para un pool `Locked` — nunca fijar el resultado a mano.
 
 **Contrato con el frontend.** La animación es coreografía, nunca física. Lee el `raceSeed` emitido y
-el orden de llegada, y reproduce el circuito fijo de Seedance con la bolita de cada participante
-coloreada por su id de NFT, usando `keccak(raceSeed, obstacleId)` para derivar el timing por
-obstáculo. El mismo circuito en cada carrera; el *resultado* es el que decidió la cadena. El podio en
-pantalla siempre debe igualar al podio on-chain.
+el orden de llegada, y reproduce el circuito fijo con la bolita de cada participante coloreada por su
+id de NFT, usando `keccak(raceSeed, obstacleId)` para derivar el timing por obstáculo. El mismo
+circuito en cada carrera; el *resultado* es el que decidió la cadena. El podio en pantalla siempre
+debe igualar al podio on-chain.
 
 ---
 
 ## 4. Matemática de pagos
 
-Porcentajes del **pot total** (`seed + todas las entradas`, incluyendo las entradas perdidas):
+Porcentajes del **pot total** (`seed + todas las entradas`):
 
 | Destinatario | Porción |
 |---|---|
@@ -195,33 +200,33 @@ Ejemplo trabajado — seed 100 MRBL, 8 jugadores a 100 cada uno → pot = 900 MR
 
 La casa siembra cada pool con emisiones de las bolitas especiales, así que las especiales (6.25% del
 supply) financian todo el piso de premio. La quema del 10% es el sink que evita que el circuito
-cerrado infle.
-
-La división entera trunca; cualquier remanente en wei se suma a la quema para que el pot siempre
-reconcilie a cero. **Cero fees varados** — la primera trampa del Challenge 08.
+cerrado infle. La división entera trunca; cualquier remanente en wei se suma a la quema para que el
+pot siempre reconcilie a cero. **Cero fees varados** — la primera trampa del Challenge 08.
 
 ---
 
-## 5. Aleatoriedad y justicia
+## 5. Aleatoriedad y justicia — Chainlink VRF v2.5
 
-**Modelo de amenaza.** La aleatoriedad no puede ser predecible ni orientable unilateralmente por
-ningún jugador, el creador del pool, ni el que hace el settlement.
+**Modelo de amenaza.** La aleatoriedad no puede ser predecible ni orientable por ningún jugador, el
+creador del pool, ni el operador.
 
-- **Commit–reveal** impide que un jugador elija su entropía después de ver la de los demás.
-- **`block.prevrandao`** se mezcla para que el resultado no quede fijado al momento del reveal.
-- **La entrada como depósito** es la palanca anti-griefing: el único ataque que queda es un jugador
-  al que no le gusta el seed emergente y retiene su reveal, y hacerlo le cuesta perder toda su
-  entrada además de sacarlo del podio.
+**La solución:** cuando el pool cierra, el contrato pide un número aleatorio a **Chainlink VRF**.
+Chainlink responde por callback con el número **y una prueba criptográfica** de que se generó
+correctamente y no fue manipulado. El `raceSeed` sale de ahí. Ni nosotros, ni un jugador, ni el
+validador del bloque pueden predecir ni torcer el resultado.
 
-**Limitación honesta (decirla en el pitch, no esconderla).** El validador que propone el bloque del
-settlement tiene influencia limitada sobre `prevrandao`, y el último en revelar tiene un bit de
-elección: revelar o no. Para un arcade en testnet con crédito de circuito cerrado y sin valor en
-efectivo, este es un trade-off aceptable y estándar. **Chainlink VRF es el upgrade drop-in
-documentado** para mainnet o cualquier deploy con valor real: se reemplaza la derivación del seed del
-paso 5, y todo lo demás queda intacto.
+Esto es un salto sobre el esquema anterior (commit-reveal + prevrandao), que tenía dos límites
+honestos — la influencia marginal del proposer sobre `prevrandao` y el bit de "revelar o no" del
+último jugador. Con VRF esos límites desaparecen: es el estándar de la industria para aleatoriedad
+verificable on-chain.
 
-Decir esto claramente es una fortaleza frente a los jueces: muestra que el modelo de amenaza se pensó
-de verdad, en lugar de barrerlo bajo la alfombra.
+**Consideraciones operativas** (no de seguridad):
+
+- El settlement es **asíncrono**: llega por callback un puñado de bloques después del lock (~30–60 s
+  en Sepolia). El frontend lo muestra como "obteniendo aleatoriedad verificable de Chainlink…" — y de
+  paso *demuestra* el mecanismo de justicia en vivo.
+- La **suscripción de VRF necesita LINK.** Hay que financiarla y agregar el contrato como consumer.
+  Ver §11 (runbook del evento).
 
 ---
 
@@ -234,9 +239,9 @@ Toda constante económica es ajustable; ninguna está hardcodeada en la lógica.
 | `minPlayers` | 8 | **Bajarlo para el demo en vivo** para que una carrera pueda correr con pocas wallets |
 | `maxPlayers` | 16 | Espeja el set físico de 16 bolitas |
 | `joinWindow` | 24h | Acortarlo drásticamente para el demo |
-| `revealWindow` | 1h | Acortarlo drásticamente para el demo |
 | `pokeBounty` | MRBL chico | Le paga al que llama `startRace` (permisionless); puede ser 0 |
 | `ratePerDay` (token) | 10e18 | Tasa de emisión por bolita |
+| `callbackGasLimit` / `requestConfirmations` | según red | Config de VRF; ajustable por el owner |
 
 ---
 
@@ -245,8 +250,7 @@ Toda constante económica es ajustable; ninguna está hardcodeada en la lógica.
 ```solidity
 event PoolCreated(uint256 indexed poolId, uint16 indexed specialId, uint128 seed, uint128 entry, uint64 joinDeadline);
 event Joined(uint256 indexed poolId, address indexed player, uint16 indexed marbleId);
-event Locked(uint256 indexed poolId, uint64 revealDeadline);
-event Revealed(uint256 indexed poolId, address indexed player);
+event RandomnessRequested(uint256 indexed poolId, uint256 requestId);
 event Settled(uint256 indexed poolId, bytes32 raceSeed, uint16[] finishingOrder);
 event Cancelled(uint256 indexed poolId);
 event Withdrawn(address indexed player, uint256 amount);
@@ -258,26 +262,23 @@ event Withdrawn(address indexed player, uint256 amount);
 
 ## 8. Decisiones ratificadas
 
-Estaban marcadas como "decidir al momento de codear" en la spec original. Ratificadas 2026-07-21.
+Marcadas como "decidir al momento de codear" en la spec original. Última ratificación 2026-07-24.
 
-1. **El seed va adentro del pot** (piso de premio) en lugar de solo definir el tamaño de la entrada.
-   Hace atractivo entrar (ganás 4.5× tu apuesta con 8 jugadores) y le da a las especiales un trabajo
-   económico real.
+1. **El seed va adentro del pot** (piso de premio). Hace atractivo entrar (ganás 4.5× tu apuesta con
+   8 jugadores) y le da a las especiales un trabajo económico real.
 2. **El cancel devuelve el seed a la bóveda; no se quema.** Un cancel significa que el pool no se
-   llenó, que es la condición de arranque en frío. Quemar el seed ahí vacía la tesorería justo cuando
-   el proyecto está más frágil — menos seeds, pisos de premio más chicos, menos razón para entrar,
-   más cancels. La deflación va en el camino de *settle*, donde está atada a actividad real. Ver §10
-   para el equilibrio de supply que esto implica.
-3. **El corte del creador va al proyecto/bóveda** porque en v1 los pools los crea el sistema.
-   **Restricción de roadmap:** una vez que las especiales se distribuyan a dueños individuales, el
-   pool anclado a la especial *N* debe pagar su corte de creador al dueño de *N*. El campo `creator`
-   por pool existe justo para esto — no lo saques en el diseño.
-4. **El orden de llegada completo se computa on-chain** (no solo el podio), para que la animación del
-   frontend tenga un orden autoritativo al que llegar. Barato con ≤16 participantes, y la pantalla
-   nunca puede diferir de la cadena.
-5. **`minPlayers` es ajustable por el owner.** El reparto de pagos asume ≥3 que llegan, así que hace
-   falta un piso. 8 es el default; tiene que ser ajustable por el drop-off del funnel el día del demo
-   (ver §11).
+   llenó (arranque en frío); quemar ahí vacía la tesorería cuando el proyecto está más frágil. La
+   deflación va en el camino de *settle*. Ver §10.
+3. **El corte del creador va al proyecto/bóveda** en v1 (pools creados por el sistema).
+   **Restricción de roadmap:** cuando las especiales tengan dueños individuales, el pool de la
+   especial *N* paga su corte al dueño de *N*. El campo `creator` existe para eso.
+4. **El orden de llegada completo se computa on-chain** para que la animación tenga un orden
+   autoritativo al que llegar.
+5. **`minPlayers` ajustable por el owner** (el reparto asume ≥3 que llegan; ver §11).
+6. **Aleatoriedad: Chainlink VRF v2.5** (reemplaza commit-reveal, ratificado 2026-07-24). Sin
+   sponsor que lo condicione, VRF es mejor aleatoriedad, elimina la fase de reveal (una sola acción
+   para el jugador — clave para el onboarding por QR) y simplifica el contrato. Costo: dependencia
+   externa asíncrona en el settle, mitigada con el video de respaldo del demo.
 
 ---
 
@@ -286,67 +287,54 @@ Estaban marcadas como "decidir al momento de codear" en la spec original. Ratifi
 Red-first, en esta secuencia. Cada paso es committeable por separado.
 
 1. Creación del pool + sembrado desde la bóveda (camino del manager).
-2. `join` con commitment + escrow de la entrada; guardas de elegibilidad de wallet/bolita.
-3. Caminos de lock: llenado atómico, y el poke permisionless por vencimiento.
+2. `join` con escrow de la entrada; guardas de elegibilidad de wallet/bolita.
+3. Caminos de lock: llenado atómico y poke permisionless por vencimiento → `requestRandomWords`.
 4. **Cancel + reembolsos antes del camino feliz** — disciplina de rescate-primero, como con la bóveda.
-5. `reveal` con verificación de commitment y contabilidad de los que no revelan.
-6. `settle`: derivación del seed, shuffle, acreditación de pagos, quema.
-7. `withdraw`, pagos tipo pull.
-8. Deploy en Sepolia + smoke test con `cast` de toda la columna vertebral.
+5. `fulfillRandomWords`: derivación del seed, shuffle, acreditación de pagos, quema.
+6. `withdraw`, pagos tipo pull.
+7. Deploy en Sepolia + suscripción VRF (LINK + consumer) + smoke test con `cast` de toda la columna.
+
+> **Nota de implementación:** el Coordinator de VRF v2.5, el `keyHash` (gas lane) y la dirección de
+> LINK en Sepolia se toman de fuentes verificadas al momento de codear — **nunca hardcodear de
+> memoria.**
 
 ---
 
 ## 10. Supply del token y equilibrio
 
-`MRBL` tiene exactamente un camino de minteo (emisiones) y un sink sistemático (la quema de la
-carrera al settlear).
+`MRBL` tiene exactamente un camino de minteo (emisiones) y un sink sistemático (la quema al settlear).
 
-**Emisión.** Cada bolita minteada acumula de forma continua. Con la tasa default de 10 MRBL/día y las
-256 bolitas minteadas, la emisión es de **2.560 MRBL/día**, sin techo y lineal. Las 16 especiales
-representan 160 MRBL/día — todo el presupuesto de sembrado de pools (6.25% del supply, por diseño).
+**Emisión.** Con la tasa default de 10 MRBL/día y las 256 bolitas minteadas, la emisión es de
+**2.560 MRBL/día**, sin techo y lineal. Las 16 especiales representan 160 MRBL/día — todo el
+presupuesto de sembrado de pools (6.25% del supply).
 
-**Sink.** Una carrera al settlear quema el 10% del pot. Para un pot de seed 100 + 8 jugadores × 100 =
-900 MRBL, eso es 90 MRBL quemados por carrera.
+**Sink.** Una carrera al settlear quema el 10% del pot (90 MRBL en el ejemplo de 900).
 
-**Equilibrio.** Mantener el supply plano requiere `2.560 / 90 ≈ 28 carreras settleadas por día`.
-Entre 16 pools simultáneos eso es **~1,8 ciclos de carrera por pool por día** — alcanzable con
-ventanas de inscripción cortas, no un número teórico.
+**Equilibrio.** Mantener el supply plano requiere `2.560 / 90 ≈ 28 carreras settleadas por día` —
+entre 16 pools, **~1,8 ciclos por pool por día**. Alcanzable, no teórico.
 
-**Palancas si se quiere una historia deflacionaria más fuerte** (en orden de honestidad y efecto):
-
-1. Subir la quema del settle por encima del 10% — escala con actividad real.
-2. Decaimiento o halving de la emisión en el tiempo — el arreglo estructural de fondo al supply
-   lineal sin techo.
-3. Sinks de quema adicionales atados a acciones deseables (crear pool, cosméticos, re-entrada).
-
-Deliberadamente *no* es una palanca: quemar en el cancel. Ver §8.2.
+**Palancas para más deflación** (en orden de honestidad): subir la quema del settle; decaimiento/
+halving de la emisión; sinks extra por acciones deseables. *No* es palanca quemar en el cancel (§8.2).
 
 ---
 
 ## 11. Runbook del día del evento (onboarding en vivo por QR)
 
-El flujo previsto en el venue es: compartir el QR de minteo → los asistentes mintean una bolita →
-los asistentes entran a una carrera → la carrera settlea en vivo. Hay una trampa de funnel acá que
-hay que manejar.
+Flujo previsto: compartir el QR de minteo → los asistentes mintean → entran a una carrera → la
+carrera settlea en vivo. Dos cosas a preparar.
 
-**La trampa.** Las emisiones acumulan *desde el timestamp de minteo*. Una bolita minteada hace dos
-minutos acumuló ≈0,03 MRBL, mientras que la entrada cuesta 100. **Una bolita recién minteada no
-puede pagar para entrar.**
+**A) La trampa del funnel.** Las emisiones acumulan *desde el timestamp de minteo*. Una bolita
+minteada hace dos minutos acumuló ≈0,03 MRBL, y la entrada cuesta 100. **Una bolita recién minteada
+no puede pagar para entrar.** Arreglo sin cambios de contrato: `ratePerDay` es ajustable y
+retroactivo; subirla hace las bolitas frescas financiables (a 100.000 MRBL/día, ~138 MRBL a los dos
+minutos). Orden: **(1)** reclamar primero las emisiones de las 16 especiales a la tasa baja
+(checkpoint), **(2)** subir `ratePerDay`, **(3)** fijar `entry`/`seed` accesibles, **(4)** acortar
+`joinWindow`, **(5)** fijar `minPlayers` a la asistencia real minutos antes.
 
-**El arreglo — sin cambios de contrato.** `ratePerDay` es ajustable por el owner y aplica de forma
-retroactiva al tiempo no reclamado. Subirla hace que las bolitas frescas sean financiables al toque:
-a 100.000 MRBL/día, una bolita minteada hace dos minutos vale ~138 MRBL.
+**B) VRF.** Antes del evento: **crear la suscripción de VRF, financiarla con LINK de Sepolia
+(generoso), y agregar el `MarbleRace` desplegado como consumer.** En el demo, el settle espera el
+callback (~30–60 s) — mostralo como "obteniendo aleatoriedad de Chainlink". Si LINK se agota, el
+sorteo no llega: por eso, sobre-financiar y tener el video de respaldo.
 
-**El orden de las operaciones importa:**
-
-1. **Reclamar primero las emisiones de las 16 especiales**, a la tasa baja. Esto fija el checkpoint
-   `lastClaim` y evita que días de tiempo no reclamado de las especiales se multipliquen por la tasa
-   del demo.
-2. **Después** subir `ratePerDay` al valor del demo.
-3. Fijar `entry`/`seed` a algo que una bolita de 2 minutos pueda pagar.
-4. Acortar `joinWindow` y `revealWindow` a minutos.
-5. Fijar `minPlayers` a la asistencia real, minutos antes de demostrar — mintear no es entrar, y
-   reclamar más entrar son transacciones adicionales donde los asistentes se caen.
-
-**Ensayar esta secuencia antes del venue.** Cada paso es una transacción del owner; ninguno requiere
-redeploy.
+**Ensayar todo esto contra Sepolia antes del venue.** Cada paso del funnel es una tx del owner;
+ninguno requiere redeploy.
