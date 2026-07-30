@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Marble Race — las 16 especiales, arte on-chain</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; background: #0e1116; color: #e6edf3;
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  }
+  header { padding: 16px 20px 8px; }
+  h1 { font-size: 16px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: #8b949e; font-size: 13px; max-width: 72ch; }
+  .wrap { display: flex; gap: 16px; padding: 12px 20px 24px; flex-wrap: wrap; align-items: flex-start; }
+  canvas { background: #11161d; border: 1px solid #222b36; border-radius: 10px; max-width: 100%; }
+  .panel { min-width: 280px; flex: 1 1 280px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+  label { color: #8b949e; min-width: 70px; }
+  input, select, button {
+    background: #161c24; color: #e6edf3; border: 1px solid #2a3441;
+    border-radius: 6px; padding: 6px 10px; font: inherit;
+  }
+  input[type="text"] { width: 160px; }
+  button { cursor: pointer; }
+  button:hover { border-color: #3d4c5e; }
+  button:disabled { opacity: .5; cursor: default; }
+  .status { padding: 8px 12px; border-radius: 8px; margin: 10px 0; font-size: 13px; }
+  .ok { background: #0f2a17; color: #6ee7a0; border: 1px solid #1c5233; }
+  .bad { background: #2a0f13; color: #ff8b8b; border: 1px solid #5b2027; }
+  .wait { background: #1b2028; color: #a9b4c0; border: 1px solid #2a3441; }
+  .board { display: grid; grid-template-columns: 26px 34px 1fr auto; gap: 3px 8px; align-items: center;
+           font-variant-numeric: tabular-nums; margin-top: 10px; }
+  .board img { width: 26px; height: 26px; border-radius: 50%; display: block; }
+  .board .pos { color: #8b949e; text-align: right; }
+  .board .done { color: #6ee7a0; font-size: 12px; }
+  .gallery { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+  .gallery img { width: 34px; height: 34px; border-radius: 50%; }
+  .note { color: #8b949e; font-size: 12px; margin-top: 14px; max-width: 52ch; }
+  code { color: #c9d6e4; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Marble Race — las 16 especiales</h1>
+  <div class="sub">
+    Las 16 bolitas especiales corren con su arte real, leído on-chain desde Sepolia
+    (<code>tokenURI</code> 1–16, sin IPFS ni archivos). La semilla decide el podio;
+    la animación <em>llega</em> a él.
+  </div>
+</header>
+
+<div class="wrap">
+  <canvas id="c" width="760" height="520"></canvas>
+
+  <div class="panel">
+    <div id="status" class="status wait">Leyendo las 16 bolitas desde Sepolia…</div>
+    <div id="gallery" class="gallery"></div>
+
+    <div class="row" style="margin-top:12px">
+      <label for="seed">semilla</label>
+      <input id="seed" type="text" value="0xA17E" />
+    </div>
+    <div class="row">
+      <label for="speed">velocidad</label>
+      <select id="speed">
+        <option value="1">1x</option>
+        <option value="2" selected>2x</option>
+        <option value="4">4x</option>
+      </select>
+    </div>
+    <div class="row">
+      <button id="run" disabled>Correr esta carrera</button>
+      <button id="newseed" disabled>Semilla al azar</button>
+    </div>
+
+    <div id="verdict" class="status wait">esperando carrera…</div>
+    <div id="board" class="board"></div>
+
+    <div class="note">
+      La misma semilla produce exactamente la misma carrera, siempre. El orden que ves
+      llegar es el orden que fijó la semilla — abajo se comprueba solo.
+    </div>
+  </div>
+</div>
+
+<script src="choreography.js"></script>
+<script>
+"use strict";
+
+const NFT = "0x8640f6ef179b85ef8ac2df69d703ba6c58fa33e1";
+const RPC = "https://ethereum-sepolia-rpc.publicnode.com"; // eth_call only — no archive access needed
+const IDS = Array.from({ length: 16 }, (_, i) => i + 1);
+const SEGMENTS = Choreo.DEFAULTS.segments;
+
+// Same track as the original spike; traced from the reference circuit.
+const CONTROL = [
+  [0.12,0.50],[0.17,0.26],[0.34,0.14],[0.55,0.20],[0.71,0.11],
+  [0.88,0.24],[0.90,0.47],[0.76,0.60],[0.58,0.54],[0.45,0.69],
+  [0.51,0.86],[0.29,0.89],[0.14,0.74],
+];
+
+// ---------- chain reads ----------
+
+/** ABI-decode a single dynamic string return value. */
+function decodeString(hex) {
+  const body = hex.slice(2);
+  const len = parseInt(body.slice(64, 128), 16);
+  const bytes = body.slice(128, 128 + len * 2).match(/.{2}/g) || [];
+  return new TextDecoder().decode(Uint8Array.from(bytes, b => parseInt(b, 16)));
+}
+
+/** tokenURI(uint256) selector + padded id. */
+function tokenUriCall(id) {
+  return "0xc87b56dd" + id.toString(16).padStart(64, "0");
+}
+
+async function loadMarbles() {
+  const batch = IDS.map((id, i) => ({
+    jsonrpc: "2.0", id: i,
+    method: "eth_call",
+    params: [{ to: NFT, data: tokenUriCall(id) }, "latest"],
+  }));
+  const res = await fetch(RPC, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(batch),
+  });
+  const json = await res.json();
+  const byId = new Map(json.map(r => [IDS[r.id], r]));
+
+  return IDS.map(id => {
+    const r = byId.get(id);
+    if (!r || r.error || !r.result) throw new Error(`tokenURI(${id}) falló`);
+    const meta = JSON.parse(atob(decodeString(r.result).split(",")[1]));
+    // Canvas needs intrinsic dimensions; the on-chain SVG only carries a viewBox.
+    const svg = atob(meta.image.split(",")[1]).replace("<svg ", '<svg width="100" height="100" ');
+    return { id, name: meta.name, src: "data:image/svg+xml;base64," + btoa(svg) };
+  });
+}
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("imagen inválida"));
+    img.src = src;
+  });
+}
+
+// ---------- track geometry ----------
+
+function catmullRom(p0, p1, p2, p3, u) {
+  const u2 = u * u, u3 = u2 * u;
+  return [
+    0.5 * ((2*p1[0]) + (-p0[0]+p2[0])*u + (2*p0[0]-5*p1[0]+4*p2[0]-p3[0])*u2 + (-p0[0]+3*p1[0]-3*p2[0]+p3[0])*u3),
+    0.5 * ((2*p1[1]) + (-p0[1]+p2[1])*u + (2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*u2 + (-p0[1]+3*p1[1]-3*p2[1]+p3[1])*u3),
+  ];
+}
+
+function buildPath(points, samplesPerSpan) {
+  const pts = [];
+  const n = points.length;
+  for (let i = 0; i < n; i++) {
+    const p0 = points[(i - 1 + n) % n], p1 = points[i];
+    const p2 = points[(i + 1) % n], p3 = points[(i + 2) % n];
+    for (let s = 0; s < samplesPerSpan; s++) pts.push(catmullRom(p0, p1, p2, p3, s / samplesPerSpan));
+  }
+  pts.push(pts[0]);
+  return pts;
+}
+
+const PATH = buildPath(CONTROL, 24);
+
+/** Position along the closed path at progress p in [0,1], in canvas pixels. */
+function pointAt(p, w, h) {
+  const t = Math.max(0, Math.min(1, p)) * (PATH.length - 1);
+  const i = Math.min(Math.floor(t), PATH.length - 2);
+  const f = t - i;
+  const a = PATH[i], b = PATH[i + 1];
+  return [(a[0] + (b[0] - a[0]) * f) * w, (a[1] + (b[1] - a[1]) * f) * h];
+}
+
+// ---------- race ----------
+
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+const el = id => document.getElementById(id);
+
+let marbles = [];      // {id, name, src, img}
+let schedules = [];
+let chainOrder = [];
+let raceStart = null;
+let raceLength = 0;
+
+/**
+ * Stand-in for the settlement the contract will do: a seed-derived shuffle.
+ * Matches the convention in verify.cjs so the engine's guarantees hold.
+ * When MarbleRace lands, this is replaced by the order the chain emits.
+ */
+function orderFromSeed(seed, ids) {
+  return ids
+    .map(id => ({ id, k: Choreo.rng(Choreo.hashString(seed + ":ord:" + id))() }))
+    .sort((a, b) => a.k - b.k)
+    .map(o => o.id);
+}
+
+function drawTrack(w, h) {
+  ctx.beginPath();
+  PATH.forEach(([x, y], i) => (i ? ctx.lineTo(x * w, y * h) : ctx.moveTo(x * w, y * h)));
+  ctx.closePath();
+  ctx.strokeStyle = "#232c38";
+  ctx.lineWidth = 26;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+  ctx.strokeStyle = "#2f3c4c";
+  ctx.lineWidth = 2;
+  ctx.setLineDash([6, 8]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  const [sx, sy] = pointAt(0, w, h);
+  ctx.fillStyle = "#e6edf3";
+  ctx.fillRect(sx - 1.5, sy - 13, 3, 26);
+}
+
+function frame(now) {
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  drawTrack(w, h);
+
+  const speed = Number(el("speed").value);
+  const t = raceStart === null ? 0 : ((now - raceStart) / 1000) * speed;
+
+  const standings = schedules.map(s => {
+    const p = Choreo.progressAt(s, t);
+    return { s, p, finished: t >= s.total };
+  });
+
+  // Draw trailing marbles first so leaders sit on top.
+  standings
+    .slice()
+    .sort((a, b) => a.p - b.p)
+    .forEach(({ s, p }) => {
+      const [x, y] = pointAt(p, w, h);
+      const m = marbles.find(mm => mm.id === s.marbleId);
+      const r = 13;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.closePath();
+      ctx.clip();
+      if (m && m.img) ctx.drawImage(m.img, x - r, y - r, r * 2, r * 2);
+      else { ctx.fillStyle = "#5b6673"; ctx.fill(); }
+      ctx.restore();
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.strokeStyle = "rgba(255,255,255,.25)";
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    });
+
+  renderBoard(standings, t);
+
+  if (t < raceLength) requestAnimationFrame(frame);
+  else finish();
+}
+
+function renderBoard(standings, t) {
+  const ranked = standings.slice().sort((a, b) => b.p - a.p);
+  el("board").innerHTML = ranked
+    .map(({ s, p, finished }, i) => {
+      const m = marbles.find(mm => mm.id === s.marbleId);
+      return `<div class="pos">${i + 1}</div>
+              <img src="${m ? m.src : ""}" alt="" />
+              <div>${m ? m.name : "#" + s.marbleId}</div>
+              <div class="done">${finished ? "🏁" : Math.round(p * 100) + "%"}</div>`;
+    })
+    .join("");
+}
+
+function finish() {
+  const rendered = Choreo.renderedFinishOrder(schedules);
+  const matches =
+    rendered.length === chainOrder.length && rendered.every((id, i) => id === chainOrder[i]);
+  const v = el("verdict");
+  v.className = "status " + (matches ? "ok" : "bad");
+  v.textContent = matches
+    ? `✓ El orden en pantalla es exactamente el que fijó la semilla (ganó Bolita #${chainOrder[0]}).`
+    : "✗ El orden en pantalla NO coincide con la semilla.";
+}
+
+function startRace() {
+  const seed = el("seed").value.trim() || "0x0";
+  chainOrder = orderFromSeed(seed, IDS);
+  schedules = Choreo.buildSchedules(chainOrder, seed);
+  raceLength = Math.max(...schedules.map(s => s.total));
+  raceStart = null;
+  const v = el("verdict");
+  v.className = "status wait";
+  v.textContent = "corriendo…";
+  requestAnimationFrame(function first(now) {
+    raceStart = now;
+    frame(now);
+  });
+}
+
+// ---------- boot ----------
+
+(async function init() {
+  drawTrack(canvas.width, canvas.height);
+  try {
+    const loaded = await loadMarbles();
+    marbles = await Promise.all(
+      loaded.map(async m => ({ ...m, img: await loadImage(m.src).catch(() => null) })),
+    );
+    el("gallery").innerHTML = marbles
+      .map(m => `<img src="${m.src}" title="${m.name}" alt="${m.name}" />`)
+      .join("");
+    const s = el("status");
+    s.className = "status ok";
+    s.textContent = `16 bolitas especiales leídas on-chain desde Sepolia ✓`;
+    el("run").disabled = false;
+    el("newseed").disabled = false;
+    startRace();
+  } catch (err) {
+    const s = el("status");
+    s.className = "status bad";
+    s.textContent = "No se pudieron leer las bolitas desde Sepolia: " + err.message;
+  }
+})();
+
+el("run").addEventListener("click", startRace);
+el("newseed").addEventListener("click", () => {
+  el("seed").value = "0x" + Math.floor(Math.random() * 0xffffffff).toString(16).toUpperCase();
+  startRace();
+});
+</script>
+</body>
+</html>
