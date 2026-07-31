@@ -5,6 +5,7 @@ import { useWatchBalance } from "@scaffold-ui/hooks";
 import type { NextPage } from "next";
 import { formatEther } from "viem";
 import { useAccount } from "wagmi";
+import { ShareQR } from "~~/components/marble/ShareQR";
 import { RainbowKitCustomConnectButton } from "~~/components/scaffold-eth";
 import {
   useScaffoldEventHistory,
@@ -270,6 +271,14 @@ const Home: NextPage = () => {
             </>
           )}
         </div>
+      </div>
+
+      <div className="mt-8 w-full max-w-md">
+        <ShareQR
+          path="/"
+          title="Escaneá para mintear tu bolita"
+          hint="Gratis. Necesitás una wallet con un poco de ETH de Sepolia para el gas."
+        />
       </div>
 
       {explorer && nftAddress && tokenAddress && (
