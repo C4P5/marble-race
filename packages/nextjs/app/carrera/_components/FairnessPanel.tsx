@@ -1,12 +1,15 @@
 "use client";
 
 import { useMemo } from "react";
+import { Spoiler } from "~~/components/marble/Spoiler";
 import { finishOrderMatches, recomputeFinishOrder } from "~~/utils/marble/fairness";
 
 type Props = {
   entrants: readonly bigint[] | undefined;
   onChainOrder: readonly bigint[] | undefined;
   randomWord: bigint | undefined;
+  /** False while the race is still running — the two columns are the spoiler. */
+  revealed: boolean;
 };
 
 const Column = ({ title, ids, sub }: { title: string; ids: readonly bigint[]; sub: string }) => (
@@ -30,7 +33,7 @@ const Column = ({ title, ids, sub }: { title: string; ids: readonly bigint[]; su
  * contract actually stored. Matching 8/8 is the "probadamente justa" claim made
  * checkable live, without trusting us or an indexer.
  */
-export const FairnessPanel = ({ entrants, onChainOrder, randomWord }: Props) => {
+export const FairnessPanel = ({ entrants, onChainOrder, randomWord, revealed }: Props) => {
   const recomputed = useMemo(
     () =>
       entrants && entrants.length > 0 && randomWord !== undefined ? recomputeFinishOrder(entrants, randomWord) : [],
@@ -61,10 +64,14 @@ export const FairnessPanel = ({ entrants, onChainOrder, randomWord }: Props) => 
               </code>
             </div>
 
-            <div className="flex gap-4">
-              <Column title="La cadena dice" sub="getFinishOrder()" ids={chain} />
-              <Column title="Tu navegador calcula" sub="Fisher-Yates + keccak256" ids={recomputed} />
-            </div>
+            {/* The orders are the spoiler; the verdict below is the pitch and
+                stays legible throughout. */}
+            <Spoiler revealed={revealed} label="Orden oculto hasta el final — pasá el mouse para espiar">
+              <div className="flex gap-4">
+                <Column title="La cadena dice" sub="getFinishOrder()" ids={chain} />
+                <Column title="Tu navegador calcula" sub="Fisher-Yates + keccak256" ids={recomputed} />
+              </div>
+            </Spoiler>
 
             {canCompare ? (
               <div

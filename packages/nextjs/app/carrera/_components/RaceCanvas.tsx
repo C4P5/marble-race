@@ -113,6 +113,8 @@ type Props = {
   seed: string | undefined;
   myTokenId: bigint | undefined;
   baseDuration?: number;
+  /** Fires once when the marbles stop — used to un-blur the podium. */
+  onFinish?: () => void;
 };
 
 /**
@@ -124,7 +126,7 @@ type Props = {
  * updates ~5x/second instead of every frame, which keeps 60fps drawing from
  * triggering 60 React renders a second.
  */
-export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration }: Props) => {
+export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration, onFinish }: Props) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [standings, setStandings] = useState<Standing[]>([]);
   const [elapsed, setElapsed] = useState(0);
@@ -136,6 +138,13 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration }: P
   useEffect(() => {
     mineRef.current = myTokenId === undefined ? undefined : Number(myTokenId);
   }, [myTokenId]);
+
+  // Same reason, and additionally: assigning a ref during render is a React
+  // Compiler error. The effect keeps it current without joining the deps below.
+  const onFinishRef = useRef(onFinish);
+  useEffect(() => {
+    onFinishRef.current = onFinish;
+  }, [onFinish]);
 
   // Stable primitive keys: bigint arrays are new objects on every read, and
   // depending on their identity would restart the animation on every poll.
@@ -310,6 +319,7 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration }: P
             color: colorOf.get(id) ?? "#5b6673",
           })),
         );
+        onFinishRef.current?.();
       }
     };
 

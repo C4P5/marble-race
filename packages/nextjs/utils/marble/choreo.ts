@@ -38,10 +38,19 @@ type ChoreoApi = {
 export const Choreo = ChoreoModule as ChoreoApi;
 
 /**
- * The VRF dead-air window means 2-4 minutes pass between the last join and a
- * visible podium. An 18s animation (the module default, tuned for the spike)
- * would end long before the chain resolves and leave the audience staring at a
- * finished race waiting for a podium. 95s covers the measured 60s VRF latency
- * with margin and lands inside the ratified 90-120s band.
+ * Live race: the animation starts when RaceDrawn lands, but `settle` still has
+ * to be mined before the chain has a finish order to compare against — up to
+ * 12s to notice Drawn, ~12s for the tx, up to 12s to notice Settled. Running
+ * long means the fairness panel can show BOTH columns the moment the marbles
+ * stop, instead of the audience watching a finished race wait for a podium.
+ * 95s sits inside the ratified 90-120s band.
  */
 export const SHOWCASE_BASE_DURATION = 95;
+
+/**
+ * Replay of an already-settled race: nothing is pending. The word, the finish
+ * order and the payouts are all on chain before the page loads, so there is no
+ * dead air to cover and the 95s is pure waiting. Short enough to hold attention,
+ * long enough for the lead changes to read.
+ */
+export const REPLAY_BASE_DURATION = 32;

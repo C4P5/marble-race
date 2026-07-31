@@ -8,9 +8,10 @@ import { useAccount, usePublicClient, useReadContracts } from "wagmi";
 import { FairnessPanel } from "~~/app/carrera/_components/FairnessPanel";
 import { JoinBox } from "~~/app/carrera/_components/JoinBox";
 import { RaceCanvas } from "~~/app/carrera/_components/RaceCanvas";
+import { Spoiler } from "~~/components/marble/Spoiler";
 import { useRaceData } from "~~/hooks/marble/useRaceData";
 import { useDeployedContractInfo, useScaffoldWriteContract, useTargetNetwork } from "~~/hooks/scaffold-eth";
-import { SHOWCASE_BASE_DURATION } from "~~/utils/marble/choreo";
+import { REPLAY_BASE_DURATION, SHOWCASE_BASE_DURATION } from "~~/utils/marble/choreo";
 import { recomputeFinishOrder } from "~~/utils/marble/fairness";
 import { RaceStatus } from "~~/utils/marble/raceState";
 
@@ -79,6 +80,23 @@ const Carrera: NextPage = () => {
 
   const isHost = Boolean(connectedAddress && race.host && connectedAddress.toLowerCase() === race.host.toLowerCase());
 
+  // Results stay blurred until the marbles stop. The finish order exists before
+  // the animation starts, so without this the podium spoils its own race.
+  const [revealed, setRevealed] = useState(false);
+  useEffect(() => {
+    setRevealed(false);
+  }, [raceId]);
+
+  // A race that was already settled when the page opened has nothing pending on
+  // chain, so the animation does not need to cover a settle window — it only
+  // needs to be watchable. A live race still runs long. Latched once, from the
+  // first status we see, so a race settling mid-animation does not speed up.
+  const [isReplay, setIsReplay] = useState<boolean | undefined>(undefined);
+  useEffect(() => {
+    if (isReplay === undefined && status !== undefined) setIsReplay(status === RaceStatus.Settled);
+  }, [status, isReplay]);
+  const baseDuration = isReplay ? REPLAY_BASE_DURATION : SHOWCASE_BASE_DURATION;
+
   return (
     <div className="flex flex-col gap-5 py-6 px-4 md:px-8 max-w-7xl mx-auto w-full">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -113,16 +131,24 @@ const Carrera: NextPage = () => {
         entrants={entrants ?? []}
         seed={seed}
         myTokenId={myTokenId}
-        baseDuration={SHOWCASE_BASE_DURATION}
+        baseDuration={baseDuration}
+        onFinish={() => setRevealed(true)}
       />
 
       <div className="grid gap-5 lg:grid-cols-2">
         <div className="flex flex-col gap-5">
           <RaceFacts race={race} myTokenId={myTokenId} />
-          <Podium order={displayOrder} ownerOf={ownerOf} settled={status === RaceStatus.Settled} pot={race.pot} />
+          <Spoiler revealed={revealed}>
+            <Podium order={displayOrder} ownerOf={ownerOf} settled={status === RaceStatus.Settled} pot={race.pot} />
+          </Spoiler>
         </div>
         <div className="flex flex-col gap-5">
-          <FairnessPanel entrants={entrants} onChainOrder={onChainFinishOrder} randomWord={randomWord} />
+          <FairnessPanel
+            entrants={entrants}
+            onChainOrder={onChainFinishOrder}
+            randomWord={randomWord}
+            revealed={revealed}
+          />
           <HostControls race={race} isHost={isHost} publicClient={publicClient} connectedAddress={connectedAddress} />
           <JoinBox
             raceId={raceId}
