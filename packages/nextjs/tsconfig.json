@@ -11,6 +11,10 @@
     "strict": true,
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
+    // node --test resolves ESM imports literally, so the fairness tests import
+    // "./fairness.ts" with the extension. Permitted, not required, and safe
+    // because noEmit is on.
+    "allowImportingTsExtensions": true,
     "esModuleInterop": true,
     "module": "esnext",
     "moduleResolution": "Bundler",
