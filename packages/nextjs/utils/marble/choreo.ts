@@ -54,3 +54,26 @@ export const SHOWCASE_BASE_DURATION = 95;
  * long enough for the lead changes to read.
  */
 export const REPLAY_BASE_DURATION = 32;
+
+/**
+ * Drama tuning, passed at the call site — the module is never edited.
+ *
+ * The finish order is fixed by the chain and cannot be affected by any of this:
+ * `noiseFor` mean-subtracts its noise so every marble's segment times sum to
+ * exactly its `total`, whatever the amplitude or the segment count. These knobs
+ * only decide how much the running order churns on the way there.
+ *
+ * `noiseAmplitude` has a hard ceiling: mean-subtracted noise lands in (-2, 2),
+ * so at 0.5 or above a segment time can go negative and a marble would travel
+ * backwards. 0.47 is as close to the edge as is safe.
+ */
+export const RACE_DYNAMICS = {
+  // 37 places round the lap where positions can swap. Frequent small trades
+  // rather than a few big ones.
+  segments: 37,
+  // Deliberately well under the 0.5 ceiling. A high amplitude reads as marbles
+  // teleporting — nothing on a rolling circuit justifies that kind of burst.
+  // With this many segments the churn comes from how often places change, not
+  // from how violently any single one does.
+  noiseAmplitude: 0.33,
+};
