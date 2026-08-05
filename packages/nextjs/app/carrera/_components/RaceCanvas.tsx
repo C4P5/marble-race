@@ -1,27 +1,58 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Choreo, SHOWCASE_BASE_DURATION, Schedule } from "~~/utils/marble/choreo";
+import { Choreo, RACE_DYNAMICS, SHOWCASE_BASE_DURATION, Schedule } from "~~/utils/marble/choreo";
 
 /**
- * Track traced from the reference circuit, same control points as the 2D spike
- * in docs/prototype/race16.html so the ported race looks like the one already
- * shown. Normalised 0-1, scaled to the canvas at draw time.
+ * The circuit — a rounded homage to the Shanghai International Circuit.
+ *
+ * Normalised 0-1, scaled to the canvas at draw time, fed through a Catmull-Rom
+ * spline and closed into a loop. Shanghai's straights are deliberately rounded
+ * off here: a straight is dead screen time for a marble race, where the reason
+ * to keep watching is the pack trading places.
+ *
+ * The choreography is time-based — `progressAt` returns 0→1 across `total`
+ * seconds however long the path is — so a longer, curvier track does NOT make
+ * the race longer. It makes the marbles cover more ground per second, which
+ * reads as speed. Same lap time, more circuit. And since these points only map
+ * progress to pixels, no shape here can change who wins.
  */
 const CONTROL: [number, number][] = [
-  [0.12, 0.5],
-  [0.17, 0.26],
-  [0.34, 0.14],
-  [0.55, 0.2],
-  [0.71, 0.11],
-  [0.88, 0.24],
-  [0.9, 0.47],
-  [0.76, 0.6],
-  [0.58, 0.54],
-  [0.45, 0.69],
-  [0.51, 0.86],
-  [0.29, 0.89],
-  [0.14, 0.74],
+  [0.1, 0.55], // start/finish — the grid and the finish fan anchor here
+  [0.09, 0.43],
+  [0.12, 0.32],
+  [0.19, 0.23],
+  [0.28, 0.17],
+  [0.38, 0.15], // sweeping top-left arc
+  [0.46, 0.19],
+  [0.51, 0.27], // dip
+  [0.57, 0.31],
+  [0.63, 0.26],
+  [0.67, 0.17], // rise back up
+  [0.75, 0.12],
+  [0.84, 0.14],
+  [0.9, 0.22],
+  [0.91, 0.32],
+  [0.86, 0.4],
+  [0.78, 0.42],
+  [0.71, 0.46], // infield sweep
+  [0.67, 0.53],
+  [0.7, 0.61],
+  [0.77, 0.65],
+  [0.85, 0.68],
+  [0.9, 0.76],
+  [0.87, 0.85], // bottom-right hairpin
+  [0.78, 0.89],
+  [0.68, 0.87],
+  [0.61, 0.81],
+  [0.54, 0.75],
+  [0.46, 0.76], // bottom esses
+  [0.4, 0.82],
+  [0.32, 0.88],
+  [0.23, 0.89],
+  [0.15, 0.84],
+  [0.11, 0.75],
+  [0.12, 0.65],
 ];
 
 /**
@@ -48,6 +79,12 @@ const LANE_COLORS = [
   "#fca5a5",
   "#2dd4bf",
 ];
+
+const TRACK_OUTER = 52;
+const TRACK_INNER = 46;
+const MARBLE_R = 10;
+/** Cinematic zoom, same as the original 2D spike. */
+const FOLLOW_ZOOM = 2.4;
 
 const catmullRom = (
   p0: [number, number],
@@ -87,13 +124,25 @@ const PATH: [number, number][] = (() => {
   return pts;
 })();
 
-const pointAt = (p: number, w: number, h: number): [number, number] => {
+type TrackPoint = { x: number; y: number; nx: number; ny: number };
+
+/**
+ * Position on the track at progress p, plus the unit normal in pixel space.
+ * The normal is what puts marbles on their own racing line and stands the
+ * checkpoint bars across the track instead of along it.
+ */
+const pointAt = (p: number, w: number, h: number): TrackPoint => {
   const t = Math.max(0, Math.min(1, p)) * (PATH.length - 1);
   const i = Math.min(Math.floor(t), PATH.length - 2);
   const f = t - i;
   const a = PATH[i];
   const b = PATH[i + 1];
-  return [(a[0] + (b[0] - a[0]) * f) * w, (a[1] + (b[1] - a[1]) * f) * h];
+  const x = (a[0] + (b[0] - a[0]) * f) * w;
+  const y = (a[1] + (b[1] - a[1]) * f) * h;
+  const dx = (b[0] - a[0]) * w;
+  const dy = (b[1] - a[1]) * h;
+  const len = Math.hypot(dx, dy) || 1;
+  return { x, y, nx: -dy / len, ny: dx / len };
 };
 
 export type Standing = {
@@ -130,17 +179,21 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration, onF
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [standings, setStandings] = useState<Standing[]>([]);
   const [elapsed, setElapsed] = useState(0);
+  const [camera, setCamera] = useState<"overview" | "follow">("overview");
 
-  // Purely cosmetic (a ring and a label), and it arrives from a slower
-  // multicall than the one that starts the race. Kept in a ref so it can never
-  // land mid-animation and restart it from the starting line.
+  // Everything below is read through a ref inside the loop rather than being an
+  // effect dependency. Any of these changing mid-race would otherwise tear down
+  // the animation and restart it from the starting line in front of the crowd.
   const mineRef = useRef<number | undefined>(undefined);
   useEffect(() => {
     mineRef.current = myTokenId === undefined ? undefined : Number(myTokenId);
   }, [myTokenId]);
 
-  // Same reason, and additionally: assigning a ref during render is a React
-  // Compiler error. The effect keeps it current without joining the deps below.
+  const cameraRef = useRef(camera);
+  useEffect(() => {
+    cameraRef.current = camera;
+  }, [camera]);
+
   const onFinishRef = useRef(onFinish);
   useEffect(() => {
     onFinishRef.current = onFinish;
@@ -151,11 +204,17 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration, onF
   const orderKey = order.map(String).join(",");
   const entrantsKey = entrants.map(String).join(",");
 
-  const colorOf = useMemo(() => {
+  const { colorOf, laneOf } = useMemo(() => {
     const ids = (entrants.length ? entrants : order).map(Number);
-    const map = new Map<number, string>();
-    ids.forEach((id, i) => map.set(id, LANE_COLORS[i % LANE_COLORS.length]));
-    return map;
+    const colors = new Map<number, string>();
+    const lanes = new Map<number, number>();
+    // Spread the field across the width of the track, centred on the middle.
+    const n = Math.max(ids.length, 1);
+    ids.forEach((id, i) => {
+      colors.set(id, LANE_COLORS[i % LANE_COLORS.length]);
+      lanes.set(id, (i - (n - 1) / 2) * Math.min(5, (TRACK_INNER - MARBLE_R) / n));
+    });
+    return { colorOf: colors, laneOf: lanes };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [entrantsKey, orderKey]);
 
@@ -171,13 +230,14 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration, onF
 
     // rankGap has to be scaled with baseDuration, not left at the module's 0.35.
     // That default was tuned against an 18s race, where it spreads the field
-    // over 13.6% of the total. Stretched to 95s and left alone it becomes 2.6%,
-    // and the whole field crosses the line inside a few pixels of track.
+    // over 13.6% of the total. Stretched and left alone it shrinks to a couple
+    // of percent and the whole field crosses the line inside a few pixels.
     const duration = baseDuration ?? SHOWCASE_BASE_DURATION;
     const schedules: Schedule[] = running
       ? Choreo.buildSchedules(ids, seed as string, {
           baseDuration: duration,
           rankGap: (duration * Choreo.DEFAULTS.rankGap) / Choreo.DEFAULTS.baseDuration,
+          ...RACE_DYNAMICS,
         })
       : [];
     const raceLength = schedules.length ? Math.max(...schedules.map(s => s.total)) : 0;
@@ -188,50 +248,71 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration, onF
     let finishedAnnounced = false;
 
     const drawTrack = (w: number, h: number) => {
-      ctx.beginPath();
-      PATH.forEach(([x, y], i) => (i ? ctx.lineTo(x * w, y * h) : ctx.moveTo(x * w, y * h)));
-      ctx.closePath();
-      ctx.strokeStyle = "#232c38";
-      ctx.lineWidth = 26;
       ctx.lineJoin = "round";
-      ctx.stroke();
-      ctx.strokeStyle = "#2f3c4c";
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 8]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      const [sx, sy] = pointAt(0, w, h);
-      ctx.fillStyle = "#e6edf3";
-      ctx.fillRect(sx - 1.5, sy - 13, 3, 26);
+      ctx.lineCap = "round";
+      const stroke = (width: number, color: string) => {
+        ctx.beginPath();
+        PATH.forEach(([x, y], i) => (i ? ctx.lineTo(x * w, y * h) : ctx.moveTo(x * w, y * h)));
+        ctx.closePath();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = width;
+        ctx.stroke();
+      };
+      // Broad two-tone tarmac, as in the original spike — wide enough for the
+      // field to run side by side instead of nose to tail.
+      stroke(TRACK_OUTER, "#1b2430");
+      stroke(TRACK_INNER, "#232f3d");
+
+      // Checkpoint bars stood across the track at the segment boundaries — the
+      // exact points where the choreography lets positions swap. Drawn from the
+      // same constant the schedules use, so they can never drift apart.
+      for (let i = 0; i < RACE_DYNAMICS.segments; i++) {
+        const pt = pointAt(i / RACE_DYNAMICS.segments, w, h);
+        ctx.save();
+        ctx.translate(pt.x, pt.y);
+        // Rotating to the normal puts local +X across the track, so the long
+        // side of the bar spans it. (Putting the long side on local Y instead
+        // lays the bar along the direction of travel and it reads as a centre
+        // line, which is what the original spike accidentally drew.)
+        ctx.rotate(Math.atan2(pt.ny, pt.nx));
+        ctx.fillStyle = i === 0 ? "#e6edf3" : "#33445a";
+        ctx.fillRect(-TRACK_INNER / 2, -1.5, TRACK_INNER, 3);
+        ctx.restore();
+      }
     };
 
     /** A marble: lane-coloured disc, "#N" badge, and a ring if it is the viewer's. */
     const drawMarble = (id: number, x: number, y: number) => {
-      const r = 14;
       const isMine = id === mineRef.current;
       ctx.beginPath();
-      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.arc(x, y, MARBLE_R, 0, Math.PI * 2);
       ctx.fillStyle = colorOf.get(id) ?? "#5b6673";
       ctx.fill();
-      ctx.lineWidth = isMine ? 3.5 : 1.5;
-      ctx.strokeStyle = isMine ? "#ffffff" : "rgba(255,255,255,.3)";
+      ctx.lineWidth = isMine ? 3 : 1.5;
+      ctx.strokeStyle = isMine ? "#ffffff" : "rgba(0,0,0,.45)";
       ctx.stroke();
       if (isMine) {
         ctx.beginPath();
-        ctx.arc(x, y, r + 5, 0, Math.PI * 2);
+        ctx.arc(x, y, MARBLE_R + 4, 0, Math.PI * 2);
         ctx.strokeStyle = "#ffffff";
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
       // The tokenId ON the racer — mandatory, this is how anyone finds their marble.
-      ctx.font = "bold 11px ui-sans-serif, system-ui, sans-serif";
+      ctx.font = "bold 10px ui-sans-serif, system-ui, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.lineWidth = 3;
-      ctx.strokeStyle = "rgba(0,0,0,.65)";
+      ctx.strokeStyle = "rgba(0,0,0,.6)";
       ctx.strokeText(`#${id}`, x, y);
       ctx.fillStyle = "#ffffff";
       ctx.fillText(`#${id}`, x, y);
+    };
+
+    const place = (p: number, id: number, w: number, h: number) => {
+      const pt = pointAt(p, w, h);
+      const lane = laneOf.get(id) ?? 0;
+      return { x: pt.x + pt.nx * lane, y: pt.y + pt.ny * lane };
     };
 
     const frame = (now: number) => {
@@ -239,40 +320,44 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration, onF
       const w = canvas.width;
       const h = canvas.height;
       const t = (now - startedAt) / 1000;
-      ctx.clearRect(0, 0, w, h);
-      drawTrack(w, h);
-
-      if (!running) {
-        // Starting grid: lined up behind the start, no motion, no progress bar.
-        // The draw has not landed, so any movement here would be a lie about
-        // state. The track is a closed loop, so the stagger wraps backwards from
-        // the line instead of going negative — pointAt clamps to [0,1] and would
-        // otherwise stack the whole field on one pixel.
-        // 2% of the lap per marble ≈ 40px of track at this canvas size, enough
-        // to clear a 28px disc. Tighter and the field reads as one blob.
-        gridIds.forEach((id, i) => {
-          const [x, y] = pointAt(1 - 0.02 * (i + 1), w, h);
-          drawMarble(id, x, y);
-        });
-        setStandings(
-          gridIds.map(id => ({
-            tokenId: id,
-            progress: 0,
-            finished: false,
-            isMine: id === mineRef.current,
-            color: colorOf.get(id) ?? "#5b6673",
-          })),
-        );
-        // Nothing moves until the draw lands, so draw once and stop. A 60fps
-        // loop over a static grid would spin for the whole join window.
-        return;
-      }
 
       const live = schedules.map(s => ({
         s,
         p: Choreo.progressAt(s, t),
         finished: t >= s.total,
       }));
+
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      // Cinematic camera: lock onto whoever is furthest round. Computed from the
+      // same positions that get drawn, so the view can never lag the marbles.
+      if (cameraRef.current === "follow" && live.length) {
+        const lead = live.reduce((a, b) => (b.p > a.p ? b : a), live[0]);
+        const lp = place(lead.p, lead.s.marbleId, w, h);
+        ctx.setTransform(FOLLOW_ZOOM, 0, 0, FOLLOW_ZOOM, w / 2 - lp.x * FOLLOW_ZOOM, h / 2 - lp.y * FOLLOW_ZOOM);
+      }
+
+      drawTrack(w, h);
+
+      if (!running) {
+        // Starting grid: lined up behind the line, no motion, no progress bar.
+        // The draw has not landed, so any movement here would be a lie about
+        // state. The track is a closed loop, so the stagger wraps backwards.
+        gridIds.forEach((id, i) => {
+          const { x, y } = place(1 - 0.012 * (i + 1), id, w, h);
+          drawMarble(id, x, y);
+        });
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        // The grid list is static, so it is published once outside this loop.
+        // Setting it here would allocate a new array 60x a second and re-render
+        // React just as often — that crashed the page outright.
+        //
+        // The loop still runs: nothing moves, but the camera control has to
+        // stay responsive while we wait for the draw.
+        raf = requestAnimationFrame(frame);
+        return;
+      }
 
       // Trailing marbles first so leaders sit on top.
       live
@@ -281,12 +366,14 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration, onF
         .forEach(({ s, p, finished }) => {
           // progressAt saturates at exactly 1, and the track is a closed loop so
           // pointAt(1) === pointAt(0). Left alone every finisher lands on the
-          // same pixel and the final frame shows one marble instead of a podium.
+          // same spot and the final frame shows one marble instead of a podium.
           // Park them in a fan just past the line, in finishing order.
-          const drawP = finished ? 1 - 0.018 * (s.rank + 1) : p;
-          const [x, y] = pointAt(drawP, w, h);
+          const drawP = finished ? 1 - 0.011 * (s.rank + 1) : p;
+          const { x, y } = place(drawP, s.marbleId, w, h);
           drawMarble(s.marbleId, x, y);
         });
+
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
 
       if (now - lastBoard > 200) {
         lastBoard = now;
@@ -323,11 +410,23 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration, onF
       }
     };
 
+    // Published once per race setup rather than per frame — see the grid branch.
+    if (!running) {
+      setStandings(
+        gridIds.map(id => ({
+          tokenId: id,
+          progress: 0,
+          finished: false,
+          isMine: id === mineRef.current,
+          color: colorOf.get(id) ?? "#5b6673",
+        })),
+      );
+    }
+
     raf = requestAnimationFrame(frame);
     return () => cancelAnimationFrame(raf);
-    // myTokenId is deliberately absent: it is read through mineRef so a late
-    // ownerOf multicall cannot restart a race that is already running.
-  }, [orderKey, entrantsKey, seed, baseDuration, colorOf]);
+    // myTokenId, camera and onFinish are read through refs on purpose — see above.
+  }, [orderKey, entrantsKey, seed, baseDuration, colorOf, laneOf]);
 
   const racing = order.length > 0 && Boolean(seed);
 
@@ -340,11 +439,27 @@ export const RaceCanvas = ({ order, entrants, seed, myTokenId, baseDuration, onF
           height={520}
           className="w-full h-auto rounded-xl border border-base-300 bg-base-300/40"
         />
-        {racing && (
-          <div className="text-xs text-base-content/60 mt-2 tabular-nums">
-            {elapsed.toFixed(1)}s de carrera · el orden de llegada ya estaba fijado antes de la primera vuelta
+        <div className="flex flex-wrap items-center gap-3 mt-2">
+          <div className="join">
+            <button
+              className={`btn btn-xs join-item ${camera === "overview" ? "btn-active" : ""}`}
+              onClick={() => setCamera("overview")}
+            >
+              Circuito completo
+            </button>
+            <button
+              className={`btn btn-xs join-item ${camera === "follow" ? "btn-active" : ""}`}
+              onClick={() => setCamera("follow")}
+            >
+              Cámara al líder
+            </button>
           </div>
-        )}
+          {racing && (
+            <span className="text-xs text-base-content/60 tabular-nums">
+              {elapsed.toFixed(1)}s · el orden de llegada ya estaba fijado antes de la primera vuelta
+            </span>
+          )}
+        </div>
       </div>
 
       <div className="w-full lg:w-72 shrink-0">
